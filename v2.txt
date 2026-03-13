@@ -1,0 +1,169 @@
+// ============================================================
+//  Weekly Shift Scheduler
+//  - Reads volunteers + preferences from the active sheet
+//  - Assigns 3 people per day (Mon–Sun)
+//  - Preferences = days someone is available (hard constraint)
+//  - No preferences = available every day
+//  - Greedy assignment followed by swap optimization pass
+//  - Writes results into columns C, E, F, G of the active sheet
+// ============================================================
+
+function generateSchedule() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+  // ── 1. Read volunteers ──────────────────────────────────────
+  const lastRow = sheet.getLastRow();
+  const data = sheet.getRange(2, 1, lastRow - 1, 2).getValues(); // columns A & B
+
+  const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  const SHIFTS_PER_DAY = 3;
+
+  const volunteers = [];
+  for (const [name, prefs] of data) {
+    if (!name) continue;
+    const available = prefs
+      ? prefs.split(",").map(d => d.trim())
+      : [...DAYS]; // no preference = available every day
+    volunteers.push({ name, available, shifts: 0 });
+  }
+
+  if (volunteers.length < SHIFTS_PER_DAY) {
+    SpreadsheetApp.getUi().alert("Not enough volunteers to fill 3 shifts per day.");
+    return;
+  }
+
+  // ── 2. Greedy assignment ────────────────────────────────────
+  // For each day, pick the 3 eligible volunteers with the fewest
+  // shifts so far, breaking ties randomly.
+
+  const schedule = {}; // { "Monday": ["Alice", "Bob", "Carol"], ... }
+
+  for (const day of DAYS) {
+    const eligible = volunteers.filter(v => v.available.includes(day));
+
+    if (eligible.length < SHIFTS_PER_DAY) {
+      SpreadsheetApp.getUi().alert(
+        `Not enough volunteers available on ${day} ` +
+        `(need ${SHIFTS_PER_DAY}, have ${eligible.length}).`
+      );
+      return;
+    }
+
+    // Shuffle first so ties are broken randomly, then sort by shift count
+    shuffleArray(eligible);
+    eligible.sort((a, b) => a.shifts - b.shifts);
+
+    const chosen = eligible.slice(0, SHIFTS_PER_DAY);
+    chosen.forEach(v => v.shifts++);
+    schedule[day] = chosen.map(v => v.name);
+  }
+
+  // ── 3. Swap optimization pass ───────────────────────────────
+  // For each assigned slot (personA on dayX), try replacing personA with
+  // any volunteer not already on dayX who:
+  //   (a) is eligible for dayX, and
+  //   (b) currently has fewer shifts than personA.
+  // Apply the replacement if it reduces the spread (max - min shifts).
+  // Repeat until no improving swap exists or the spread reaches <= 1.
+
+  const volunteerMap = {};
+  volunteers.forEach(v => { volunteerMap[v.name] = v; });
+
+  const getSpread = () => {
+    const counts = volunteers.map(v => v.shifts);
+    return Math.max(...counts) - Math.min(...counts);
+  };
+
+  let improved = true;
+  let iterations = 0;
+  const MAX_ITERATIONS = 1000;
+
+  while (improved && iterations < MAX_ITERATIONS) {
+    improved = false;
+    iterations++;
+
+    const currentSpread = getSpread();
+    if (currentSpread <= 1) break;
+
+    outerLoop:
+    for (const dayX of DAYS) {
+      for (let iA = 0; iA < schedule[dayX].length; iA++) {
+        const volA = volunteerMap[schedule[dayX][iA]];
+
+        for (const volC of volunteers) {
+          // volC must not already be on dayX
+          if (schedule[dayX].includes(volC.name)) continue;
+          // volC must be available on dayX
+          if (!volC.available.includes(dayX)) continue;
+          // Only try if volC has strictly fewer shifts (otherwise no benefit)
+          if (volC.shifts >= volA.shifts) continue;
+
+          // Simulate: volA loses a shift, volC gains one
+          volA.shifts--;
+          volC.shifts++;
+          const newSpread = getSpread();
+
+          if (newSpread < currentSpread) {
+            // Improvement found — apply permanently
+            schedule[dayX][iA] = volC.name;
+            improved = true;
+            break outerLoop;
+          } else {
+            // No improvement — revert
+            volA.shifts++;
+            volC.shifts--;
+          }
+        }
+      }
+    }
+  }
+
+  // ── 4. Write schedule to sheet ──────────────────────────────
+  // Headers in row 1, results in rows 2–8 aligned with column D (Day of week)
+
+  sheet.getRange(1, 5).setValue("Assigned 1");
+  sheet.getRange(1, 6).setValue("Assigned 2");
+  sheet.getRange(1, 7).setValue("Assigned 3");
+
+  const dayColValues = sheet.getRange(2, 4, lastRow - 1, 1).getValues();
+
+  for (let i = 0; i < dayColValues.length; i++) {
+    const cellDay = dayColValues[i][0];
+    if (schedule[cellDay]) {
+      const row = i + 2;
+      sheet.getRange(row, 5).setValue(schedule[cellDay][0]);
+      sheet.getRange(row, 6).setValue(schedule[cellDay][1]);
+      sheet.getRange(row, 7).setValue(schedule[cellDay][2]);
+    }
+  }
+
+  // ── 5. Write shift counts to column C ──────────────────────
+  const nameColValues = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+
+  for (let i = 0; i < nameColValues.length; i++) {
+    const cellName = nameColValues[i][0];
+    if (!cellName) continue;
+    const volunteer = volunteers.find(v => v.name === cellName);
+    if (volunteer) {
+      sheet.getRange(i + 2, 3).setValue(volunteer.shifts);
+    }
+  }
+
+  SpreadsheetApp.getUi().alert("Schedule generated successfully!");
+}
+
+// Fisher-Yates shuffle (in-place)
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+// ── Add a menu item when the spreadsheet opens ──────────────
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("Scheduler")
+    .addItem("Generate weekly schedule", "generateSchedule")
+    .addToUi();
+}
