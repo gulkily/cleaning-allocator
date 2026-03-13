@@ -1,0 +1,113 @@
+// ============================================================
+//  Weekly Shift Scheduler
+//  - Reads volunteers + preferences from the active sheet
+//  - Assigns 3 people per day (Mon–Sun)
+//  - Preferences = days someone is available (hard constraint)
+//  - No preferences = available every day
+//  - Balances total shifts as evenly as possible
+//  - Writes results into column E onward of the active sheet
+// ============================================================
+
+function generateSchedule() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+  // ── 1. Read volunteers ──────────────────────────────────────
+  const lastRow = sheet.getLastRow();
+  const data = sheet.getRange(2, 1, lastRow - 1, 2).getValues(); // columns A & B
+
+  const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  const SHIFTS_PER_DAY = 3;
+
+  const volunteers = [];
+  for (const [name, prefs] of data) {
+    if (!name) continue;
+    const available = prefs
+      ? prefs.split(",").map(d => d.trim())
+      : [...DAYS]; // no preference = available every day
+    volunteers.push({ name, available, shifts: 0 });
+  }
+
+  if (volunteers.length < SHIFTS_PER_DAY) {
+    SpreadsheetApp.getUi().alert("Not enough volunteers to fill 3 shifts per day.");
+    return;
+  }
+
+  // ── 2. Build schedule with balanced shift counts ────────────
+  // Strategy: for each day, among eligible volunteers pick the 3
+  // with the fewest shifts so far, breaking ties randomly.
+
+  const schedule = {}; // { "Monday": ["Alice", "Bob", "Carol"], ... }
+
+  for (const day of DAYS) {
+    const eligible = volunteers.filter(v => v.available.includes(day));
+
+    if (eligible.length < SHIFTS_PER_DAY) {
+      SpreadsheetApp.getUi().alert(
+        `Not enough volunteers available on ${day} ` +
+        `(need ${SHIFTS_PER_DAY}, have ${eligible.length}).`
+      );
+      return;
+    }
+
+    // Shuffle first so ties are broken randomly
+    shuffleArray(eligible);
+    // Then sort by current shift count (ascending)
+    eligible.sort((a, b) => a.shifts - b.shifts);
+
+    const chosen = eligible.slice(0, SHIFTS_PER_DAY);
+    chosen.forEach(v => v.shifts++);
+    schedule[day] = chosen.map(v => v.name);
+  }
+
+  // ── 3. Write results to sheet ───────────────────────────────
+  // Layout: column E = header "Assigned", columns F+ = person 1, 2, 3
+  // Rows aligned with the Day of week column (D), rows 2–8
+
+  // Write headers in row 1
+  sheet.getRange(1, 5).setValue("Assigned 1");
+  sheet.getRange(1, 6).setValue("Assigned 2");
+  sheet.getRange(1, 7).setValue("Assigned 3");
+
+  // Find the rows that correspond to each day (column D)
+  const dayColValues = sheet.getRange(2, 4, lastRow - 1, 1).getValues();
+
+  for (let i = 0; i < dayColValues.length; i++) {
+    const cellDay = dayColValues[i][0];
+    if (schedule[cellDay]) {
+      const row = i + 2; // 1-indexed, offset by header row
+      sheet.getRange(row, 5).setValue(schedule[cellDay][0]);
+      sheet.getRange(row, 6).setValue(schedule[cellDay][1]);
+      sheet.getRange(row, 7).setValue(schedule[cellDay][2]);
+    }
+  }
+
+  // ── 4. Write shift counts to column C ──────────────────────
+  const nameColValues = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+
+  for (let i = 0; i < nameColValues.length; i++) {
+    const cellName = nameColValues[i][0];
+    if (!cellName) continue;
+    const volunteer = volunteers.find(v => v.name === cellName);
+    if (volunteer) {
+      sheet.getRange(i + 2, 3).setValue(volunteer.shifts);
+    }
+  }
+
+  SpreadsheetApp.getUi().alert("Schedule generated successfully!");
+}
+
+// Fisher-Yates shuffle (in-place)
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+// ── Add a menu item when the spreadsheet opens ──────────────
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("Scheduler")
+    .addItem("Generate weekly schedule", "generateSchedule")
+    .addToUi();
+}
